@@ -18,6 +18,9 @@ if (NOT AFR_ENABLE_UNIT_TESTS)
     add_subdirectory("libraries/3rdparty")
 endif()
 
+# Add Azure IoT Middleware
+add_subdirectory("libraries/azure-iot-middleware-freertos")
+
 # -------------------------------------------------------------------------------------------------
 # Configure target board
 # -------------------------------------------------------------------------------------------------
@@ -174,6 +177,7 @@ cmake_policy(SET CMP0079 NEW)
 if(TARGET aws_demos)
     list(TRANSFORM AFR_DEMOS_ENABLED PREPEND "AFR::" OUTPUT_VARIABLE demos_list)
     target_link_libraries(aws_demos PRIVATE ${demos_list})
+    target_link_libraries(aws_demos PRIVATE az::iot_middleware::freertos AFR::logging AFR::kernel::mcu_port)
 endif()
 
 if(TARGET aws_tests)
