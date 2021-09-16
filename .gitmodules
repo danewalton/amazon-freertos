@@ -116,3 +116,6 @@
 [submodule "libraries/abstractions/ota_pal_psa"]
 	path = libraries/abstractions/ota_pal_psa
 	url = https://github.com/Linaro/freertos-ota-pal-psa.git
+[submodule "libraries/azure-iot-middleware-freertos"]
+	path = libraries/azure-iot-middleware-freertos
+	url = https://github.com/Azure/azure-iot-middleware-freertos.git

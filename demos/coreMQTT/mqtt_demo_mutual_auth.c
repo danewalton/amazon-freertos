@@ -34,7 +34,7 @@
  * memory. It uses QoS1 for sending to and receiving messages from the broker.
  *
  * A mutually authenticated TLS connection is used to connect to the
- * MQTT message broker in this example. Define democonfigMQTT_BROKER_ENDPOINT
+ * MQTT message broker in this example. Define democonfigIOTHUB_HOSTNAME
  * and democonfigROOT_CA_PEM, in mqtt_demo_mutual_auth_config.h, and the client
  * private key and certificate, in aws_clientcredential_keys.h, to establish a
  * mutually authenticated connection.
@@ -81,8 +81,10 @@
 /* Include header for root CA certificates. */
 #include "iot_default_root_certificates.h"
 
-/* Include AWS IoT metrics macros header. */
-#include "aws_iot_metrics.h"
+/* Azure includes */
+#include "azure_iot_hub_client.h"
+#include "azure_iot_provisioning_client.h"
+
 
 /*------------- Demo configurations -------------------------*/
 
@@ -99,8 +101,8 @@
 /**
  * @brief The MQTT broker endpoint used for this demo.
  */
-#ifndef democonfigMQTT_BROKER_ENDPOINT
-    #define democonfigMQTT_BROKER_ENDPOINT    clientcredentialMQTT_BROKER_ENDPOINT
+#ifndef democonfigIOTHUB_HOSTNAME
+    #define democonfigIOTHUB_HOSTNAME    clientcredentialMQTT_BROKER_ENDPOINT
 #endif
 
 /**
@@ -158,6 +160,8 @@
  * @brief Timeout for receiving CONNACK packet in milliseconds.
  */
 #define mqttexampleCONNACK_RECV_TIMEOUT_MS                ( 1000U )
+
+#define democonfigAZURE_IOT_DEVICE_NAME "<insert device ID here>"
 
 /**
  * @brief The topic to subscribe and publish to in the example.
@@ -242,6 +246,17 @@ struct NetworkContext
 {
     SecureSocketsTransportParams_t * pParams;
 };
+
+/*-----------------------------------------------------------*/
+
+/* Azure variables */
+
+#define mqttexampleAZURE_TELEMETRY_MESSAGE "{\"Test Data\":\"Data\"}"
+
+static AzureIoTHubClient_t xIoTHubClient;
+static uint8_t ucIoTHubBuffer[5120];
+static uint64_t ulGlobalEntryTime = 1639093301;
+uint64_t ullGetUnixTime( void );
 
 /*-----------------------------------------------------------*/
 
@@ -528,8 +543,21 @@ int RunCoreMqttMutualAuthDemo( bool awsIotMqttMode,
 
             /* Sends an MQTT Connect packet over the already established TLS connection,
              * and waits for connection acknowledgment (CONNACK) packet. */
-            LogInfo( ( "Creating an MQTT connection to %s.", democonfigMQTT_BROKER_ENDPOINT ) );
+            LogInfo( ( "Creating an MQTT connection to %s.", democonfigIOTHUB_HOSTNAME ) );
             xDemoStatus = prvCreateMQTTConnectionWithBroker( &xMQTTContext, &xNetworkContext );
+        }
+        vTaskDelay( mqttexampleDELAY_BETWEEN_PUBLISHES_TICKS );
+
+        for( ; ; )
+        {
+          AzureIoTHubClient_SendTelemetry(&xIoTHubClient,
+                                          mqttexampleAZURE_TELEMETRY_MESSAGE,
+                                          strlen(mqttexampleAZURE_TELEMETRY_MESSAGE),
+                                          NULL,
+                                          eAzureIoTHubMessageQoS1,
+                                          NULL);
+          AzureIoTHubClient_ProcessLoop(&xIoTHubClient, 50);
+          vTaskDelay( mqttexampleDELAY_BETWEEN_PUBLISHES_TICKS );
         }
 
         /**************************** Subscribe. ******************************/
@@ -599,7 +627,7 @@ int RunCoreMqttMutualAuthDemo( bool awsIotMqttMode,
             /* Send an MQTT Disconnect packet over the already connected TLS over TCP connection.
              * There is no corresponding response for the disconnect packet. After sending
              * disconnect, client must close the network connection. */
-            LogInfo( ( "Disconnecting the MQTT connection with %s.", democonfigMQTT_BROKER_ENDPOINT ) );
+            LogInfo( ( "Disconnecting the MQTT connection with %s.", democonfigIOTHUB_HOSTNAME ) );
             xMQTTStatus = MQTT_Disconnect( &xMQTTContext );
         }
 
@@ -729,8 +757,8 @@ static BaseType_t prvConnectToServerWithBackoffRetries( NetworkContext_t * pxNet
 
     /* Set the credentials for establishing a TLS connection. */
     /* Initializer server information. */
-    xServerInfo.pHostName = democonfigMQTT_BROKER_ENDPOINT;
-    xServerInfo.hostNameLength = strlen( democonfigMQTT_BROKER_ENDPOINT );
+    xServerInfo.pHostName = democonfigIOTHUB_HOSTNAME;
+    xServerInfo.hostNameLength = strlen( democonfigIOTHUB_HOSTNAME );
     xServerInfo.port = democonfigMQTT_BROKER_PORT;
 
     /* Configure credentials for TLS mutual authenticated session. */
@@ -756,10 +784,10 @@ static BaseType_t prvConnectToServerWithBackoffRetries( NetworkContext_t * pxNet
     do
     {
         /* Establish a TLS session with the MQTT broker. This example connects to
-         * the MQTT broker as specified in democonfigMQTT_BROKER_ENDPOINT and
+         * the MQTT broker as specified in democonfigIOTHUB_HOSTNAME and
          * democonfigMQTT_BROKER_PORT at the top of this file. */
         LogInfo( ( "Creating a TLS connection to %s:%u.",
-                   democonfigMQTT_BROKER_ENDPOINT,
+                   democonfigIOTHUB_HOSTNAME,
                    democonfigMQTT_BROKER_PORT ) );
         /* Attempt to create a mutually authenticated TLS connection. */
         xNetworkStatus = SecureSocketsTransport_Connect( pxNetworkContext,
@@ -785,63 +813,43 @@ static BaseType_t prvConnectToServerWithBackoffRetries( NetworkContext_t * pxNet
 static BaseType_t prvCreateMQTTConnectionWithBroker( MQTTContext_t * pxMQTTContext,
                                                      NetworkContext_t * pxNetworkContext )
 {
-    MQTTStatus_t xResult;
-    MQTTConnectInfo_t xConnectInfo;
-    bool xSessionPresent;
-    TransportInterface_t xTransport;
+    AzureIoTTransportInterface_t xTransport;
     BaseType_t xStatus = pdFAIL;
 
     /* Fill in Transport Interface send and receive function pointers. */
-    xTransport.pNetworkContext = pxNetworkContext;
-    xTransport.send = SecureSocketsTransport_Send;
-    xTransport.recv = SecureSocketsTransport_Recv;
+    xTransport.pxNetworkContext = pxNetworkContext;
+    xTransport.xSend = SecureSocketsTransport_Send;
+    xTransport.xRecv = SecureSocketsTransport_Recv;
 
-    /* Initialize MQTT library. */
-    xResult = MQTT_Init( pxMQTTContext, &xTransport, prvGetTimeMs, prvEventCallback, &xBuffer );
-    configASSERT( xResult == MQTTSuccess );
-
-    /* Some fields are not used in this demo so start with everything at 0. */
-    ( void ) memset( ( void * ) &xConnectInfo, 0x00, sizeof( xConnectInfo ) );
-
-    /* Start with a clean session i.e. direct the MQTT broker to discard any
-     * previous session data. Also, establishing a connection with clean session
-     * will ensure that the broker does not store any data when this client
-     * gets disconnected. */
-    xConnectInfo.cleanSession = true;
-
-    /* The client identifier is used to uniquely identify this MQTT client to
-     * the MQTT broker. In a production device the identifier can be something
-     * unique, such as a device serial number. */
-    xConnectInfo.pClientIdentifier = democonfigCLIENT_IDENTIFIER;
-    xConnectInfo.clientIdentifierLength = ( uint16_t ) strlen( democonfigCLIENT_IDENTIFIER );
-
-    /* Use the metrics string as username to report the OS and MQTT client version
-     * metrics to AWS IoT. */
-    xConnectInfo.pUserName = AWS_IOT_METRICS_STRING;
-    xConnectInfo.userNameLength = AWS_IOT_METRICS_STRING_LENGTH;
-
-    /* Set MQTT keep-alive period. If the application does not send packets at an interval less than
-     * the keep-alive period, the MQTT library will send PINGREQ packets. */
-    xConnectInfo.keepAliveSeconds = mqttexampleKEEP_ALIVE_TIMEOUT_SECONDS;
-
-    /* Send MQTT CONNECT packet to broker. LWT is not used in this demo, so it
-     * is passed as NULL. */
-    xResult = MQTT_Connect( pxMQTTContext,
-                            &xConnectInfo,
-                            NULL,
-                            mqttexampleCONNACK_RECV_TIMEOUT_MS,
-                            &xSessionPresent );
-
-    if( xResult != MQTTSuccess )
+    AzureIoTResult_t xIoTResult = AzureIoTHubClient_Init(&xIoTHubClient, (const uint8_t*)democonfigIOTHUB_HOSTNAME,
+                                                            strlen(democonfigIOTHUB_HOSTNAME),
+                                                            (const uint8_t*)democonfigAZURE_IOT_DEVICE_NAME,
+                                                            strlen(democonfigAZURE_IOT_DEVICE_NAME),
+                                                            NULL,
+                                                            ucIoTHubBuffer,
+                                                            sizeof(ucIoTHubBuffer),
+                                                            ullGetUnixTime,
+                                                            &xTransport);
+    if (xIoTResult == eAzureIoTSuccess)
     {
-        LogError( ( "Failed to establish MQTT connection: Server=%s, MQTTStatus=%s",
-                    democonfigMQTT_BROKER_ENDPOINT, MQTT_Status_strerror( xResult ) ) );
+      LogInfo(("Initialized"));
     }
     else
     {
-        /* Successfully established and MQTT connection with the broker. */
-        LogInfo( ( "An MQTT connection is established with %s.", democonfigMQTT_BROKER_ENDPOINT ) );
-        xStatus = pdPASS;
+      LogError(("Error during initialization: %d", xIoTResult));
+    }
+
+    bool xWasPresent;
+    xIoTResult = AzureIoTHubClient_Connect(&xIoTHubClient, true, &xWasPresent, 500);
+
+    if(xIoTResult == eAzureIoTSuccess)
+    {
+      LogInfo(("Successfully connected!"));
+      xStatus = pdPASS;
+    }
+    else
+    {
+      LogError(("Failed to connect"));
     }
 
     return xStatus;
@@ -1151,6 +1159,26 @@ static void prvEventCallback( MQTTContext_t * pxMQTTContext,
     {
         prvMQTTProcessResponse( pxPacketInfo, pxDeserializedInfo->packetIdentifier );
     }
+}
+
+/*-----------------------------------------------------------*/
+
+uint64_t ullGetUnixTime( void )
+{
+    TickType_t xTickCount = 0;
+    uint64_t ulTime = 0UL;
+
+    /* Get the current tick count. */
+    xTickCount = xTaskGetTickCount();
+
+    /* Convert the ticks to milliseconds. */
+    ulTime = ( uint64_t ) xTickCount / configTICK_RATE_HZ;
+
+    /* Reduce ulGlobalEntryTimeMs from obtained time so as to always return the
+     * elapsed time in the application. */
+    ulTime = ( uint64_t ) ( ulTime + ulGlobalEntryTime );
+
+    return ulTime;
 }
 
 /*-----------------------------------------------------------*/
